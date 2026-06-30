@@ -52,22 +52,10 @@ MODELS = {
 }
 
 
-def convert_to_png(source_path: Path) -> Path:
-    png_path = source_path.with_suffix(".png")
-    image = Image.open(source_path)
-    if image.mode not in ("RGB", "RGBA"):
-        image = image.convert("RGB")
-    image.save(png_path, format="PNG")
-    return png_path
 
-
-def prepare_image_path(source_path: Path) -> Path:
-    suffix = source_path.suffix.lower()
-    if suffix not in SUPPORTED_EXTENSIONS:
+def validate_image_path(source_path: Path) -> None:
+    if source_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError("Поддерживаются только JPG, JPEG и PNG.")
-    if suffix in {".jpg", ".jpeg"}:
-        return convert_to_png(source_path)
-    return source_path
 
 
 def resize_for_preview(image: np.ndarray, max_size: tuple[int, int]) -> np.ndarray:
@@ -331,8 +319,8 @@ class DetectionApp(QMainWindow):
 
         try:
             source_path = Path(file_path)
-            working_path = prepare_image_path(source_path)
-            image = cv2.imread(str(working_path))
+            validate_image_path(source_path)
+            image = cv2.imread(str(source_path))
             if image is None:
                 raise ValueError("Не удалось прочитать выбранный файл.")
 
