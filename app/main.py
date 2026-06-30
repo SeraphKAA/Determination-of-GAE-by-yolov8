@@ -3,7 +3,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -25,7 +25,13 @@ from ultralytics import YOLO
 APP_DIR = Path(__file__).resolve().parent
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 CONF_THRESHOLD = 0.25
+IOU_THRESHOLD = 0.45
 PREVIEW_MAX_SIZE = (480, 480)
+CYRILLIC_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
 
 MODELS = {
     "gender": {
@@ -88,50 +94,76 @@ def numpy_bgr_to_qpixmap(image: np.ndarray, max_size: tuple[int, int]) -> QPixma
     return QPixmap.fromImage(qimage.copy())
 
 
+def _load_cyrillic_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for font_path in CYRILLIC_FONT_PATHS:
+        if Path(font_path).exists():
+            return ImageFont.truetype(font_path, size)
+    return ImageFont.load_default()
+
+
 def draw_detections(base_image: np.ndarray, enabled_models: dict[str, YOLO]) -> tuple[np.ndarray, list[str]]:
     result_image = base_image.copy()
     text_lines: list[str] = []
+    labels_to_draw: list[tuple[str, int, int, tuple[int, int, int]]] = []
+    font = _load_cyrillic_font(16)
 
     for key, model in enabled_models.items():
         config = MODELS[key]
-        results = model(base_image, conf=CONF_THRESHOLD, verbose=False)
+        results = model(
+            base_image,
+            conf=CONF_THRESHOLD,
+            iou=IOU_THRESHOLD,
+            agnostic_nms=True,
+            verbose=False,
+        )
         boxes = results[0].boxes
 
         if boxes is None or len(boxes) == 0:
             text_lines.append(f"{config['title']}: объекты не найдены")
             continue
 
-        best_box = max(boxes, key=lambda box: float(box.conf[0]))
-        cls_id = int(best_box.cls[0])
-        confidence = float(best_box.conf[0])
-        class_name = model.names[cls_id]
-        x1, y1, x2, y2 = map(int, best_box.xyxy[0])
-
+        model_lines: list[str] = []
         color = config["color"]
-        cv2.rectangle(result_image, (x1, y1), (x2, y2), color, 2)
-        label = f"{config['title']}: {class_name} ({confidence * 100:.1f}%)"
-        text_lines.append(label)
 
-        text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        text_x = x1
-        text_y = max(y1 - 8, text_size[1] + 8)
-        cv2.rectangle(
-            result_image,
-            (text_x, text_y - text_size[1] - baseline - 4),
-            (text_x + text_size[0] + 6, text_y + 4),
-            color,
-            -1,
-        )
-        cv2.putText(
-            result_image,
-            label,
-            (text_x + 3, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        for index, box in enumerate(boxes, start=1):
+            cls_id = int(box.cls[0])
+            confidence = float(box.conf[0])
+            class_name = model.names[cls_id]
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+            cv2.rectangle(result_image, (x1, y1), (x2, y2), color, 2)
+            label = f"{config['title']}: {class_name} ({confidence * 100:.1f}%)"
+            if len(boxes) > 1:
+                model_lines.append(f"  {index}. {class_name} ({confidence * 100:.1f}%)")
+            else:
+                model_lines.append(f"{config['title']}: {class_name} ({confidence * 100:.1f}%)")
+
+            text_bbox = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox((0, 0), label, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            text_x = x1
+            text_y = int(max(y1 - text_height - 10, 4))
+            cv2.rectangle(
+                result_image,
+                (text_x, text_y),
+                (text_x + text_width + 6, text_y + text_height + 6),
+                color,
+                -1,
+            )
+            labels_to_draw.append((label, text_x + 3, text_y + 2, color))
+
+        if len(boxes) > 1:
+            text_lines.append(f"{config['title']} ({len(boxes)}):")
+            text_lines.extend(model_lines)
+        else:
+            text_lines.extend(model_lines)
+
+    if labels_to_draw:
+        pil_image = Image.fromarray(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_image)
+        for label, text_x, text_y, _ in labels_to_draw:
+            draw.text((text_x, text_y), label, font=font, fill=(255, 255, 255))
+        result_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
     return result_image, text_lines
 
